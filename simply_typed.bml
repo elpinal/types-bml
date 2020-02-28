@@ -1,0 +1,212 @@
+module Type :> sig
+  type t
+
+  val int : t
+  val arrow : t -> t -> t
+
+  val show : t -> string
+  val `==` : t -> t -> bool
+
+  type error
+
+  val show_error : error -> string
+
+  val get_arrow : t -> result error (t * t)
+end = struct
+  datatype u 'a =
+    | Int
+    | Arrow of 'a * 'a
+
+  module Y = Yoneda.Make struct type t = u end
+
+  module Fixed = Cata.F Y
+  include Fixed
+
+  signature S = Y.S where type a := t
+
+  module F (X : S) = struct
+    val p = In $ Y.In $ pack X : S
+  end
+
+  val int = (F struct val value _ = Int end).p
+
+  val arrow x (y : t) = (F struct val value f = Arrow(f x, f y) end).p
+
+  include struct
+    open Pretty
+
+    val show = cata $ fun ty n -> match Y.lower ty with
+      | Int         -> "int"
+      | Arrow(x, y) -> paren (open Int in 2 < n) $ x 3 <+> "->" <+> y 2
+    end
+  end
+
+  val show x = show x 0
+
+  val rec `==` (In x) (In y) =
+    match (Y.lower x, Y.lower y) with
+      | (Int, Int)                     -> true
+      | (Arrow(x1, y1), Arrow(x2, y2)) -> Bool.r#and (x1 == x2) $ y1 == y2
+      | _                              -> false
+    end
+
+  datatype error =
+    | NotArrow of t
+
+  include struct
+    open Pretty
+
+    val show_error = function
+      | NotArrow ty -> "not arrow type:" <+> show ty
+    end
+  end
+
+  val get_arrow (In x) =
+    match Y.lower x with
+      | Arrow(x, y) -> Ok(x, y)
+      | _           -> Err $ NotArrow $ In x
+    end
+end
+
+type var = string
+
+module Env :> sig
+  type t
+
+  type error
+
+  val show_error : error -> string
+
+  val empty : t
+  val insert : t -> var -> Type.t -> t
+  val lookup : t -> var -> result error Type.t
+end = struct
+  module VarMap = Map.Make String
+
+  type t = VarMap.t Type.t
+
+  datatype error =
+    | Unbound of var
+
+  val show_error = function
+    | Unbound v -> open Pretty in "unbound variable:" <+> v
+  end
+
+  val empty = VarMap.empty
+
+  val insert env v ty = VarMap.insert v ty env
+
+  val lookup env v =
+    match VarMap.lookup v env with
+      | Some ty -> Ok ty
+      | None    -> Err $ Unbound v
+    end
+end
+
+module Term :> sig
+  type t
+
+  val var : var -> t
+  val abs : var -> Type.t -> t -> t
+  val app : t -> t -> t
+
+  val show : t -> string
+
+  type error
+
+  val show_error : error -> string
+
+  val type_of : t -> result error Type.t
+end = struct
+  datatype u 'a =
+    | Var of var
+    | Abs of var * Type.t * 'a
+    | App of 'a * 'a
+
+  module Y = Yoneda.Make struct type t = u end
+
+  module Fixed = Cata.F Y
+  include Fixed
+
+  signature S = Y.S where type a := t
+
+  module F (X : S) = struct
+    val p = In $ Y.In $ pack X : S
+  end
+
+  val var v = (F struct val value _ = Var v end).p
+
+  val abs v ty (x : t) = (F struct val value f = Abs(v, ty, f x) end).p
+
+  val app (x : t) y = (F struct val value f = App(f x, f y) end).p
+
+  include struct
+    open Pretty
+
+    val show = cata $ fun t n -> match Y.lower t with
+      | Var v         -> v
+      | Abs(v, ty, x) -> paren (open Int in 0 < n) $ "lambda" <+> v <+> ":" <+> Type.show ty <> "." <+> x 0
+      | App(x, y)     -> paren (open Int in 4 < n) $ x 4 <+> y 5
+    end
+  end
+
+  val show x = show x 0
+
+  datatype error =
+    | EnvError of Env.error
+    | TypeError of Type.error
+    | TypeMismatch of Type.t * Type.t
+
+  module Res = Result.Monad struct type e = error end
+
+  include struct
+    open Pretty
+
+    val show_error = function
+      | EnvError e             -> Env.show_error e
+      | TypeError e            -> Type.show_error e
+      | TypeMismatch(ty1, ty2) -> open Type in "type mismatch:" <+> show ty1 <+> "vs" <+> show ty2
+    end
+  end
+
+  val alg_type_of t env =
+    match Y.lower t with
+      | Var v         -> Result.map_err EnvError $ Env.lookup env v
+      | Abs(v, ty, x) -> Result.map (Type.arrow ty) $ x $ Env.insert env v ty
+      | App(x, y)     ->
+          Res.bind (x env) $ fun ty1 ->
+          Res.bind (Result.map_err TypeError $ Type.get_arrow ty1) $ fun (ty11, ty12) ->
+          Res.bind (y env) $ fun ty2 ->
+          if Type.`==` ty11 ty2
+          then Ok ty12
+          else Err $ TypeMismatch(ty11, ty2)
+    end
+
+  val type_of t = cata alg_type_of t Env.empty
+end
+
+open struct
+  open Term
+
+  val print = print_endline <<< show
+
+  val _ = print $ var "x"
+  val _ = print $ var "y"
+  val _ = print $ app (var "y") (var "y")
+  val _ = print $ abs "x" (open Type in arrow int int) $ var "y"
+  val _ = print $ abs "x" Type.int $ app (var "y") (var "z")
+  val _ = print $ app (abs "x" Type.int $ var "y") $ abs "x" Type.int $ var "y"
+  val _ = print $ abs "x" (open Type in arrow (arrow int int) int) $ var "y"
+  val _ = print $ abs "x" (open Type in arrow int (arrow int int)) $ var "y"
+
+  val typecheck t = print_endline $
+    match type_of t with
+      | Ok ty -> Type.show ty
+      | Err e -> open Pretty in "error:" <+> Term.show_error e
+    end
+
+  val _ = typecheck $ var "x"
+  val _ = typecheck $ abs "x" Type.int $ var "x"
+  val _ = typecheck $ app (abs "x" Type.int $ var "x") $ abs "x" Type.int $ var "x"
+  val _ = typecheck $ app (abs "x" (Type.arrow Type.int Type.int) $ var "x") $ abs "x" Type.int $ var "x"
+end

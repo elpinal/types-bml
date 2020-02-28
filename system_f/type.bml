@@ -1,0 +1,181 @@
+module IntState = State struct type t = int end
+
+module TypeVar :> sig
+  type t
+
+  val fresh : IntState.t t
+  val show : t -> string
+
+  include Ord.OPS where type t := t
+
+  module Set : Set.S where type key = t
+  module Map : Map.S where type key = t
+end = struct
+  type t = int
+
+  val fresh =
+    open IntState in
+    bind get $ fun n ->
+    bind (modify $ fun x -> x + 1) $ fun _ ->
+    return n
+
+  val show n = Int.show n
+
+  include Ord.Make Int
+
+  module Set = Set.Make Int
+  module Map = Map.Make Int
+end
+
+module Type :> sig
+  type t
+  type var = TypeVar.t
+
+  val int : t
+  val arrow : t -> t -> t
+  val var : var -> t
+  val forall : var -> t -> t
+  val exist : var -> t -> t
+
+  val show : t -> string
+  val `==` : t -> t -> bool
+
+  type error
+
+  val show_error : error -> string
+
+  val get_arrow : t -> result error (t * t)
+  val get_forall : t -> result error (var * t)
+  val get_exist : t -> result error (var * t)
+
+  val well_formed : TypeVar.Set.t -> t -> result error unit
+
+  val subst : var -> t -> t -> t
+  val not_escape : var -> t -> bool
+end = struct
+  type var = TypeVar.t
+
+  datatype u 'a =
+    | Int
+    | Arrow of 'a * 'a
+    | Var of var
+    | Forall of var * 'a
+    | Exist of var * 'a
+
+  module Y = Yoneda.Make struct type t = u end
+
+  module Fixed = Cata.F Y
+  include Fixed
+
+  signature S = Y.S where type a := t
+
+  module F (X : S) = struct
+    val p = In $ Y.In $ pack X : S
+  end
+
+  val int = (F struct val value _ = Int end).p
+
+  val arrow x (y : t) = (F struct val value f = Arrow(f x, f y) end).p
+
+  val var v = (F struct val value _ = Var v end).p
+
+  val forall v (x : t) = (F struct val value f = Forall(v, f x) end).p
+
+  val exist v (x : t) = (F struct val value f = Exist(v, f x) end).p
+
+  include struct
+    open Pretty
+
+    val show = cata $ Y.lower >>> function
+      | Int          -> "int"
+      | Arrow(x, y)  -> x <+> "->" <+> y
+      | Var v        -> TypeVar.show v
+      | Forall(v, x) -> "forall" <+> TypeVar.show v <> "." <+> x
+      | Exist(v, x)  -> "exist" <+> TypeVar.show v <> "." <+> x
+    end
+  end
+
+  // Alpha-equivalence.
+  // Assume each bound variables are distinct.
+  val `==` x y =
+    let val rec go m (In x) (In y) =
+      match (Y.lower x, Y.lower y) with
+        | (Int, Int)                     -> true
+        | (Arrow(x1, y1), Arrow(x2, y2)) -> Bool.r#and (go m x1 x2) $ go m y1 y2
+        | (Var v1, Var v2)               ->
+            match TypeVar.Map.lookup v1 m with
+              | Some v2' -> TypeVar.`==` v2 v2'
+              | None     -> TypeVar.`==` v1 v2
+            end
+        | (Forall(v1, x), Forall(v2, y)) -> go (TypeVar.Map.insert v1 v2 m) x y
+        | (Exist(v1, x), Exist(v2, y))   -> go (TypeVar.Map.insert v1 v2 m) x y
+        | _                              -> false
+      end
+    in
+    go TypeVar.Map.empty x y
+
+  datatype error =
+    | NotArrow of t
+    | NotForall of t
+    | NotExist of t
+    | Unbound of var
+
+  include struct
+    open Pretty
+
+    val show_error = function
+      | NotArrow ty  -> "not arrow type:" <+> show ty
+      | NotForall ty -> "not universal type:" <+> show ty
+      | NotExist ty  -> "not existential type:" <+> show ty
+      | Unbound v    -> "unbound type variable:" <+> TypeVar.show v
+    end
+  end
+
+  val get_arrow (In x) =
+    match Y.lower x with
+      | Arrow p -> Ok p
+      | _       -> Err $ NotArrow $ In x
+    end
+
+  val get_forall (In x) =
+    match Y.lower x with
+      | Forall p -> Ok p
+      | _        -> Err $ NotForall $ In x
+    end
+
+  val get_exist (In x) =
+    match Y.lower x with
+      | Exist p -> Ok p
+      | _       -> Err $ NotExist $ In x
+    end
+
+  module Res = Result.Monad struct type e = error end
+
+  val well_formed = flip $ cata $ fun x env ->
+    match Y.lower x with
+      | Int          -> Ok()
+      | Arrow(x, y)  -> Res.bind (x env) $ const $ y env
+      | Var v        -> if TypeVar.Set.member v env then Ok() else Err $ Unbound v
+      | Forall(v, x) -> x $ TypeVar.Set.insert v env
+      | Exist(v, x)  -> x $ TypeVar.Set.insert v env
+    end
+
+  val subst v by = cata $ Y.lower >>> function
+    | Int         -> int
+    | Arrow(x, y) -> arrow x y
+    | Var v0      ->
+        if TypeVar.`==` v0 v
+        then by
+        else var v0
+    | Forall(v0, x) -> forall v0 x
+    | Exist(v0, x)  -> exist v0 x
+  end
+
+  val not_escape v = cata $ Y.lower >>> function
+    | Int          -> true
+    | Arrow(x, y)  -> Bool.r#and x y
+    | Var v0       -> TypeVar.`/=` v0 v
+    | Forall(_, x) -> x
+    | Exist(_, x)  -> x
+  end
+end

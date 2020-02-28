@@ -1,0 +1,72 @@
+module Syntax :> sig
+  type t
+
+  type var = string
+
+  val var : var -> t
+  val abs : var -> t -> t
+  val app : t -> t -> t
+
+  val show : t -> string
+  val `==` : t -> t -> bool
+end = struct
+  type var = string
+
+  datatype u 'a =
+    | Var of var
+    | Abs of var * 'a
+    | App of 'a * 'a
+
+  module Y = Yoneda.Make struct type t = u end
+
+  module Fixed = Cata.F Y
+  include Fixed
+
+  signature S = Y.S where type a := t
+
+  module F (X : S) = struct
+    val p = In $ Y.In $ pack X : S
+  end
+
+  val var v = (F struct val value _ = Var v end).p
+
+  val abs v (x : t) = (F struct val value f = Abs(v, f x) end).p
+
+  val app (x : t) y = (F struct val value f = App(f x, f y) end).p
+
+  include struct
+    open Pretty
+
+    val show = cata $ fun t n -> match Y.lower t with
+      | Var v     -> v
+      | Abs(v, x) -> paren (open Int in 0 < n) $ "lambda" <+> v <> "." <+> x 0
+      | App(x, y) -> paren (open Int in 4 < n) $ x 4 <+> y 5
+    end
+  end
+
+  val show x = show x 0
+
+  val `==` =
+    let val rec go (In x) (In y) =
+      match (Y.lower x, Y.lower y) with
+        | (Var v1, Var v2)           -> String.`==` v1 v2
+        | (Abs(v1, x), Abs(v2, y))   -> Bool.r#and (String.`==` v1 v2) $ go x y
+        | (App(x1, y1), App(x2, y2)) -> Bool.r#and (go x1 y1) $ go x2 y2
+        | _                          -> false
+      end
+    in
+    go
+end
+
+open struct
+  open Syntax
+
+  val print = print_endline <<< show
+
+  val _ = print $ var "x"
+  val _ = print $ var "y"
+  val _ = print $ app (var "y") (var "y")
+  val _ = print $ abs "x" $ var "y"
+  val _ = print $ abs "x" $ app (var "y") (var "z")
+  val _ = print $ app (abs "x" $ var "y") $ abs "x" $ var "y"
+end

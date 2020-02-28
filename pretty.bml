@@ -1,0 +1,17 @@
+module Pretty : sig
+  type t = string
+
+  val `<>`  : t -> t -> t
+  val `<+>` : t -> t -> t
+
+  val paren : bool -> t -> t
+end = struct
+  include String
+
+  val `<+>` x y = x <> " " <> y
+
+  val paren b x =
+    if b
+    then "(" <> x <> ")"
+    else x
+end

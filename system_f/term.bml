@@ -1,0 +1,148 @@
+module Term :> sig
+  type t
+
+  val int : int -> t
+  val var : var -> t
+  val abs : var -> Type.t -> t -> t
+  val app : t -> t -> t
+  val gen : TypeVar.t -> t -> t
+  val inst : t -> Type.t -> t
+  val r#pack : Type.t -> t -> TypeVar.t -> Type.t -> t
+  val r#unpack : TypeVar.t -> var -> t -> t -> t
+
+  type error
+
+  val show_error : error -> string
+
+  val type_of : t -> result error Type.t
+end = struct
+  datatype u 'a =
+    | Int of int
+    | Var of var
+    | Abs of var * Type.t * 'a
+    | App of 'a * 'a
+    | Gen of TypeVar.t * 'a
+    | Inst of 'a * Type.t
+    | Pack of Type.t * 'a * TypeVar.t * Type.t
+    | Unpack of TypeVar.t * var * 'a * 'a
+
+  module Y = Yoneda.Make struct type t = u end
+
+  module Fixed = Cata.F Y
+  include Fixed
+
+  signature S = Y.S where type a := t
+
+  module F (X : S) = struct
+    val p = In $ Y.In $ pack X : S
+  end
+
+  val int n = (F struct val value _ = Int n end).p
+
+  val var v = (F struct val value _ = Var v end).p
+
+  val abs v ty (x : t) = (F struct val value f = Abs(v, ty, f x) end).p
+
+  val app (x : t) y = (F struct val value f = App(f x, f y) end).p
+
+  val gen tv (x : t) = (F struct val value f = Gen(tv, f x) end).p
+
+  val inst (x : t) ty = (F struct val value f = Inst(f x, ty) end).p
+
+  val r#pack witness (x : t) tv ty = (F struct val value f = Pack(witness, f x, tv, ty) end).p
+
+  val r#unpack tv v (x : t) y = (F struct val value f = Unpack(tv, v, f x, f y) end).p
+
+  datatype error =
+    | EnvError of Env.error
+    | TypeError of Type.error
+    | TypeMismatch of Type.t * Type.t
+    | Escape of TypeVar.t * Type.t
+
+  include struct
+    open Pretty
+
+    val show_error = function
+      | EnvError e             -> Env.show_error e
+      | TypeError e            -> Type.show_error e
+      | TypeMismatch(ty1, ty2) -> open Type in "type mismatch:" <+> show ty1 <+> "vs" <+> show ty2
+      | Escape(tv, ty)         ->
+          "escaped existential type variable:" <+> TypeVar.show tv <+> "in" <+> Type.show ty
+    end
+  end
+
+  module Res = Result.Monad struct type e = error end
+
+  val type_error_bind = Res.bind <<< Result.map_err TypeError
+
+  val type_of = cata $ fun t env -> match Y.lower t with
+    | Int _ -> Ok Type.int
+    | Var v -> Result.map_err EnvError $ Env.Term.lookup env v
+    | Abs(v, ty, x) ->
+        type_error_bind (Env.Type.well_formed env ty) $ fun _ ->
+        Res.bind (x $ Env.Term.insert env v ty) $ fun ty2 ->
+        Ok $ Type.arrow ty ty2
+    | App(x, y) ->
+        Res.bind (x env) $ fun ty1 ->
+        type_error_bind (Type.get_arrow ty1) $ fun (ty11, ty12) ->
+        Res.bind (y env) $ fun ty2 ->
+        if Type.`==` ty11 ty2
+        then Ok ty12
+        else Err $ TypeMismatch(ty11, ty2)
+    | Gen(tv, x) -> Result.map (Type.forall tv) $ x $ Env.Type.insert env tv
+    | Inst(x, ty2) ->
+        Res.bind (x env) $ fun ty ->
+        type_error_bind (Type.get_forall ty) $ fun (tv, ty1) ->
+        type_error_bind (Env.Type.well_formed env ty2) $ fun _ ->
+        Ok $ Type.subst tv ty2 ty1
+    | Pack(witness, x, tv, ty) ->
+        type_error_bind (Env.Type.well_formed env witness) $ fun _ ->
+        type_error_bind (Env.Type.well_formed env $ Type.exist tv ty) $ fun _ ->
+        Res.bind (x env) $ fun ty1 ->
+        let val ty2 = Type.subst tv witness ty in
+        if Type.`==` ty1 ty2
+        then Ok $ Type.exist tv ty
+        else Err $ TypeMismatch(ty1, ty2)
+    | Unpack(tv, v, x, y) ->
+        Res.bind (x env) $ fun ty1 ->
+        type_error_bind (Type.get_exist ty1) $ fun (tv1, ty1) ->
+        let val ty1 = Type.subst tv1 (Type.var tv) ty1 in
+        Res.bind (y $ Env.Term.insert (Env.Type.insert env tv) v ty1) $ fun ty2 ->
+        if Type.not_escape tv ty2
+        then Ok ty2
+        else Err $ Escape(tv, ty2)
+  end
+
+  val type_of t = type_of t Env.empty
+end
+
+open struct
+  open Term
+
+  val typecheck t = print_endline $
+    match type_of t with
+      | Ok ty -> Type.show ty
+      | Err e -> open Pretty in "error:" <+> Term.show_error e
+    end
+
+  val _ = typecheck $ var "x"
+  val _ = typecheck $ abs "x" Type.int $ var "x"
+  val _ = typecheck $ app (abs "x" Type.int $ var "x") $ abs "x" Type.int $ var "x"
+  val _ = typecheck $ app (abs "x" (Type.arrow Type.int Type.int) $ var "x") $ abs "x" Type.int $ var "x"
+
+  val _ = open IntState in run_result 0 $
+    bind TypeVar.fresh $ fun tv1 ->
+    bind TypeVar.fresh $ fun tv2 ->
+    let
+      val _ = typecheck $ abs "x" (Type.var tv1) $ var "x"
+      val _ = typecheck $ abs "x" (Type.var tv2) $ var "x"
+      val _ = typecheck $ gen tv1 $ abs "x" (Type.var tv1) $ var "x"
+      val _ = typecheck $ inst (gen tv1 $ abs "x" (Type.var tv1) $ var "x") Type.int
+      val _ = typecheck $ inst (gen tv1 $ abs "x" (Type.var tv1) $ var "x") $ Type.var tv2
+      val t1 = r#pack Type.int (int 42) tv1 $ Type.var tv1
+      val _ = typecheck t1
+      val _ = typecheck $ r#unpack tv2 "x" t1 $ var "x"
+      val _ = typecheck $ r#unpack tv2 "x" t1 $ int 3
+    in
+    return ()
+end
