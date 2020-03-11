@@ -73,41 +73,42 @@ end = struct
 
   module Res = Result.Monad struct type e = error end
 
-  val type_error_bind = Res.bind <<< Result.map_err TypeError
+  val `val+` = Res.`val+`
+  val `val!` = Res.bind <<< Result.map_err TypeError
 
   val type_of = cata $ fun t env -> match Y.lower t with
     | Int _ -> Ok Type.int
     | Var v -> Result.map_err EnvError $ Env.Term.lookup env v
     | Abs(v, ty, x) ->
-        type_error_bind (Env.Type.well_formed env ty) $ fun _ ->
-        Res.bind (x $ Env.Term.insert env v ty) $ fun ty2 ->
+        val! _ = Env.Type.well_formed env ty in
+        val+ ty2 = x $ Env.Term.insert env v ty in
         Ok $ Type.arrow ty ty2
     | App(x, y) ->
-        Res.bind (x env) $ fun ty1 ->
-        type_error_bind (Type.get_arrow ty1) $ fun (ty11, ty12) ->
-        Res.bind (y env) $ fun ty2 ->
+        val+ ty1 = x env in
+        val! (ty11, ty12) = Type.get_arrow ty1 in
+        val+ ty2 = y env in
         if Type.`==` ty11 ty2
         then Ok ty12
         else Err $ TypeMismatch(ty11, ty2)
     | Gen(tv, x) -> Result.map (Type.forall tv) $ x $ Env.Type.insert env tv
     | Inst(x, ty2) ->
-        Res.bind (x env) $ fun ty ->
-        type_error_bind (Type.get_forall ty) $ fun (tv, ty1) ->
-        type_error_bind (Env.Type.well_formed env ty2) $ fun _ ->
+        val+ ty = x env in
+        val! (tv, ty1) = Type.get_forall ty in
+        val! _ = Env.Type.well_formed env ty2 in
         Ok $ Type.subst tv ty2 ty1
     | Pack(witness, x, tv, ty) ->
-        type_error_bind (Env.Type.well_formed env witness) $ fun _ ->
-        type_error_bind (Env.Type.well_formed env $ Type.exist tv ty) $ fun _ ->
-        Res.bind (x env) $ fun ty1 ->
+        val! _ = Env.Type.well_formed env witness in
+        val! _ = Env.Type.well_formed env $ Type.exist tv ty in
+        val+ ty1 = x env in
         let val ty2 = Type.subst tv witness ty in
         if Type.`==` ty1 ty2
         then Ok $ Type.exist tv ty
         else Err $ TypeMismatch(ty1, ty2)
     | Unpack(tv, v, x, y) ->
-        Res.bind (x env) $ fun ty1 ->
-        type_error_bind (Type.get_exist ty1) $ fun (tv1, ty1) ->
+        val+ ty1 = x env in
+        val! (tv1, ty1) = (Type.get_exist ty1) in
         let val ty1 = Type.subst tv1 (Type.var tv) ty1 in
-        Res.bind (y $ Env.Term.insert (Env.Type.insert env tv) v ty1) $ fun ty2 ->
+        val+ ty2 = y $ Env.Term.insert (Env.Type.insert env tv) v ty1 in
         if Type.not_escape tv ty2
         then Ok ty2
         else Err $ Escape(tv, ty2)
@@ -131,8 +132,8 @@ open struct
   val _ = typecheck $ app (abs "x" (Type.arrow Type.int Type.int) $ var "x") $ abs "x" Type.int $ var "x"
 
   val _ = open IntState in run_result 0 $
-    bind TypeVar.fresh $ fun tv1 ->
-    bind TypeVar.fresh $ fun tv2 ->
+    val+ tv1 = TypeVar.fresh in
+    val+ tv2 = TypeVar.fresh in
     let
       val _ = typecheck $ abs "x" (Type.var tv1) $ var "x"
       val _ = typecheck $ abs "x" (Type.var tv2) $ var "x"

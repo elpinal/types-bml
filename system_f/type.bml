@@ -15,8 +15,8 @@ end = struct
 
   val fresh =
     open IntState in
-    bind get $ fun n ->
-    bind (modify $ fun x -> x + 1) $ fun _ ->
+    val+ n = get in
+    val+ _ = modify $ fun x -> x + 1 in
     return n
 
   val show n = Int.show n

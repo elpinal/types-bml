@@ -174,9 +174,10 @@ end = struct
       | Var v         -> Result.map_err EnvError $ Env.lookup env v
       | Abs(v, ty, x) -> Result.map (Type.arrow ty) $ x $ Env.insert env v ty
       | App(x, y)     ->
-          Res.bind (x env) $ fun ty1 ->
-          Res.bind (Result.map_err TypeError $ Type.get_arrow ty1) $ fun (ty11, ty12) ->
-          Res.bind (y env) $ fun ty2 ->
+          open Res in
+          val+ ty1 = x env in
+          val+ (ty11, ty12) = Result.map_err TypeError $ Type.get_arrow ty1 in
+          val+ ty2 = y env in
           if Type.`==` ty11 ty2
           then Ok ty12
           else Err $ TypeMismatch(ty11, ty2)
